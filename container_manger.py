@@ -235,3 +235,30 @@ class ContainerManager:
         for c in all_containers:
             result.append(self._summarize_container(c))
         return result
+
+    def delete_container(self, name_or_id: str, force: bool = False) -> Dict[str, Any]:
+        """
+        Stop and remove a container by name or ID.
+        If force=True, remove even if running.
+        """
+        cli = self._cli()
+        try:
+            c = cli.containers.get(name_or_id)
+        except docker.errors.NotFound:
+            return {"deleted": False, "reason": "not_found", "name_or_id": name_or_id}
+
+        info = {
+            "id": c.id[:12],
+            "name": c.name,
+            "image": c.image.tags[0] if c.image.tags else c.image.short_id,
+            "status_before": c.status,
+        }
+
+        try:
+            c.remove(force=force)
+            info["deleted"] = True
+        except Exception as e:
+            info["deleted"] = False
+            info["error"] = str(e)
+
+        return info

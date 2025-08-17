@@ -8,6 +8,7 @@ import uuid
 import pytest
 import docker
 from fastapi.testclient import TestClient
+from container_manger import ContainerManager
 
 
 IMAGE = "nginx:alpine"          # runs with no args
@@ -181,3 +182,91 @@ def test_status_stopped_creates_then_stops(app_module, dclient):
     c.reload()
     # stopped containers report as 'exited'
     assert c.status in ("exited", "created")
+
+
+
+# ---------- test the delete container ----------
+
+
+def _create_nginx(dclient: docker.DockerClient, *, name=None, labels=None, expose_port=False):
+    """
+    Small helper to create an nginx container for testing.
+    If expose_port=True, requests a random host port mapping for 80/tcp
+    to ensure the container is RUNNING.
+    """
+    ports = {"80/tcp": None} if expose_port else None
+    return dclient.containers.run(
+        "nginx:alpine",
+        detach=True,
+        name=name,
+        labels=labels or {},
+        ports=ports
+    )
+
+
+def test_delete_container_exited(app_module, dclient):
+    """
+    Create a container, stop it, and then delete it with force=false.
+    Expect 200 and that the container no longer exists.
+    """
+    client = TestClient(app_module.app)
+
+    labels = {ContainerManager.LABEL_KEY: "nginx:alpine"}
+    c = _create_nginx(dclient, labels=labels)
+    cname = c.name
+    try:
+        c.stop(timeout=5)
+
+        resp = client.delete(f"/containers/{cname}?force=false")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data.get("deleted") is True
+
+        with pytest.raises(docker.errors.NotFound):
+            dclient.containers.get(cname)
+    finally:
+        # Cleanup in case of intermediate failure
+        try:
+            dclient.containers.get(cname).remove(force=True)
+        except docker.errors.NotFound:
+            pass
+
+
+def test_delete_container_running_force(app_module, dclient):
+    """
+    Create a RUNNING container and delete it with force=true.
+    Expect 200 and that the container is gone.
+    """
+    client = TestClient(app_module.app)
+
+    labels = {ContainerManager.LABEL_KEY: "nginx:alpine"}
+    c = _create_nginx(dclient, labels=labels, expose_port=True)
+    cname = c.name
+    try:
+        c.reload()
+        assert c.status in ("created", "restarting", "running")
+
+        resp = client.delete(f"/containers/{cname}?force=true")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data.get("deleted") is True
+
+        with pytest.raises(docker.errors.NotFound):
+            dclient.containers.get(cname)
+    finally:
+        try:
+            dclient.containers.get(cname).remove(force=True)
+        except docker.errors.NotFound:
+            pass
+
+
+def test_delete_container_not_found(app_module):
+    """
+    Deleting a non-existent container should return 404.
+    """
+    client = TestClient(app_module.app)
+    resp = client.delete("/containers/this-name-should-not-exist-xyz?force=true")
+    assert resp.status_code == 404
+    assert "not found" in resp.json().get("detail", "").lower()
+
+
